@@ -2,7 +2,7 @@ name: Auto-update devo-bin
 
 on:
   schedule:
-    # Daily at 8:23 UTC (random minute to spread load)
+    # Daily at 8:23 UTC
     - cron: '23 8 * * *'
   workflow_dispatch:
 
@@ -13,6 +13,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: master
           fetch-depth: 0
 
       - name: Check for upstream update
@@ -50,40 +51,38 @@ jobs:
           CURRENT="${{ steps.check.outputs.current }}"
 
           # Download both architecture tarballs
-          echo "Downloading x86_64 tarball..."
-          curl -sSL --fail -o "devo-x86_64.tar.gz" \
+          echo "::group::Downloading release tarballs"
+          curl -sSL --fail -o /tmp/devo-x86_64.tar.gz \
             "https://github.com/7df-lab/devo/releases/download/v${VERSION}/devo-v${VERSION}-x86_64-unknown-linux-musl.tar.gz"
-
-          echo "Downloading aarch64 tarball..."
-          curl -sSL --fail -o "devo-aarch64.tar.gz" \
+          curl -sSL --fail -o /tmp/devo-aarch64.tar.gz \
             "https://github.com/7df-lab/devo/releases/download/v${VERSION}/devo-v${VERSION}-aarch64-unknown-linux-musl.tar.gz"
+          echo "::endgroup::"
 
           # Compute sha256sums
-          SHA_X86=$(sha256sum devo-x86_64.tar.gz | cut -d' ' -f1)
-          SHA_AARCH64=$(sha256sum devo-aarch64.tar.gz | cut -d' ' -f1)
+          SHA_X86=$(sha256sum /tmp/devo-x86_64.tar.gz | cut -d' ' -f1)
+          SHA_AARCH64=$(sha256sum /tmp/devo-aarch64.tar.gz | cut -d' ' -f1)
 
           echo "sha_x86=${SHA_X86}" >> "$GITHUB_OUTPUT"
           echo "sha_aarch64=${SHA_AARCH64}" >> "$GITHUB_OUTPUT"
 
-          echo "::notice::x86_64 sha256: ${SHA_X86}"
+          echo "::notice::x86_64  sha256: ${SHA_X86}"
           echo "::notice::aarch64 sha256: ${SHA_AARCH64}"
 
-          # Update PKGBUILD
-          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
-          sed -i "s|v${CURRENT}|v${VERSION}|g" PKGBUILD
-          sed -i "s|devo-bin-${CURRENT}|devo-bin-${VERSION}|g" PKGBUILD
-          sed -i "s/^sha256sums_x86_64=('.*')/sha256sums_x86_64=('${SHA_X86}')/" PKGBUILD
-          sed -i "s/^sha256sums_aarch64=('.*')/sha256sums_aarch64=('${SHA_AARCH64}')/" PKGBUILD
+          # Generate updated PKGBUILD
+          sed "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD > /tmp/PKGBUILD.new
+          sed -i "s|v${CURRENT}|v${VERSION}|g" /tmp/PKGBUILD.new
+          sed -i "s|devo-bin-${CURRENT}|devo-bin-${VERSION}|g" /tmp/PKGBUILD.new
+          sed -i "s/^sha256sums_x86_64=('.*')/sha256sums_x86_64=('${SHA_X86}')/" /tmp/PKGBUILD.new
+          sed -i "s/^sha256sums_aarch64=('.*')/sha256sums_aarch64=('${SHA_AARCH64}')/" /tmp/PKGBUILD.new
 
-          # Update .SRCINFO — replace all version occurrences (safe: dotted version won't match hex checksums)
-          sed -i "s/${CURRENT}/${VERSION}/g" .SRCINFO
-          sed -i "s/^\([[:space:]]*sha256sums_x86_64 = \).*/\1${SHA_X86}/" .SRCINFO
-          sed -i "s/^\([[:space:]]*sha256sums_aarch64 = \).*/\1${SHA_AARCH64}/" .SRCINFO
+          # Generate updated .SRCINFO
+          cp .SRCINFO /tmp/.SRCINFO.new
+          sed -i "s/${CURRENT}/${VERSION}/g" /tmp/.SRCINFO.new
+          sed -i "s/^\([[:space:]]*sha256sums_x86_64 = \).*/\1${SHA_X86}/" /tmp/.SRCINFO.new
+          sed -i "s/^\([[:space:]]*sha256sums_aarch64 = \).*/\1${SHA_AARCH64}/" /tmp/.SRCINFO.new
 
-          # Cleanup
-          rm -f devo-x86_64.tar.gz devo-aarch64.tar.gz
-
-          echo "::notice::PKGBUILD and .SRCINFO updated to version ${VERSION}"
+          # Cleanup downloads
+          rm -f /tmp/devo-x86_64.tar.gz /tmp/devo-aarch64.tar.gz
 
       - name: Setup SSH for AUR
         if: steps.check.outputs.update == 'true'
@@ -91,25 +90,45 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
 
-      - name: Commit and push to AUR
+      - name: Push update to AUR
         if: steps.check.outputs.update == 'true'
         run: |
+          VERSION="${{ steps.check.outputs.latest }}"
+
           # Add AUR host key
+          mkdir -p ~/.ssh
           ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
 
-          # Configure git
           git config user.name "ch4xer"
           git config user.email "ch4ser@users.noreply.github.com"
 
-          # Stage and commit
+          # Build a clean commit for AUR (no subdirectories allowed)
+          # Start from the aur branch which has no .github/
+          git checkout aur
+
+          # Apply updated files
+          cp /tmp/PKGBUILD.new PKGBUILD
+          cp /tmp/.SRCINFO.new .SRCINFO
+
           git add PKGBUILD .SRCINFO
-          git commit -m "Update to ${{ steps.check.outputs.latest }}" || true
+          git commit -m "Update to ${VERSION}" || echo "No changes to commit"
 
-          # Add AUR remote and push
+          # Push aur branch -> AUR master
           git remote add aur ssh://aur@aur.archlinux.org/devo-bin.git 2>/dev/null || true
-          git push aur master
+          git push aur aur:master
 
-      - name: Push to GitHub
+      - name: Sync update to GitHub master
         if: steps.check.outputs.update == 'true'
         run: |
+          VERSION="${{ steps.check.outputs.latest }}"
+
+          # Switch back to master and apply the same updates
+          git checkout master
+
+          cp /tmp/PKGBUILD.new PKGBUILD
+          cp /tmp/.SRCINFO.new .SRCINFO
+
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to ${VERSION}" || echo "No changes to commit"
+
           git push origin master
