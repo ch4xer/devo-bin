@@ -3,3 +3,6 @@
 !/PKGBUILD
 !.SRCINFO
 !.gitignore
+!/.github/
+!/.github/workflows/
+!/.github/workflows/check-update.yml

@@ -1,0 +1,115 @@
+name: Auto-update devo-bin
+
+on:
+  schedule:
+    # Daily at 8:23 UTC (random minute to spread load)
+    - cron: '23 8 * * *'
+  workflow_dispatch:
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for upstream update
+        id: check
+        run: |
+          LATEST=$(curl -sS \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/7df-lab/devo/releases/latest | jq -r .tag_name)
+
+          if [ -z "$LATEST" ] || [ "$LATEST" = "null" ]; then
+            echo "::error::Failed to fetch latest release from 7df-lab/devo"
+            exit 1
+          fi
+
+          LATEST_VER="${LATEST#v}"
+          CURRENT_VER=$(grep -oP '^pkgver=\K.*' PKGBUILD)
+
+          echo "latest=${LATEST_VER}" >> "$GITHUB_OUTPUT"
+          echo "current=${CURRENT_VER}" >> "$GITHUB_OUTPUT"
+
+          if [ "$LATEST_VER" != "$CURRENT_VER" ]; then
+            echo "update=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::New version found: v${LATEST_VER} (current: v${CURRENT_VER})"
+          else
+            echo "update=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Already at latest version: v${CURRENT_VER}"
+          fi
+
+      - name: Download tarballs and compute checksums
+        if: steps.check.outputs.update == 'true'
+        id: update
+        run: |
+          VERSION="${{ steps.check.outputs.latest }}"
+          CURRENT="${{ steps.check.outputs.current }}"
+
+          # Download both architecture tarballs
+          echo "Downloading x86_64 tarball..."
+          curl -sSL --fail -o "devo-x86_64.tar.gz" \
+            "https://github.com/7df-lab/devo/releases/download/v${VERSION}/devo-v${VERSION}-x86_64-unknown-linux-musl.tar.gz"
+
+          echo "Downloading aarch64 tarball..."
+          curl -sSL --fail -o "devo-aarch64.tar.gz" \
+            "https://github.com/7df-lab/devo/releases/download/v${VERSION}/devo-v${VERSION}-aarch64-unknown-linux-musl.tar.gz"
+
+          # Compute sha256sums
+          SHA_X86=$(sha256sum devo-x86_64.tar.gz | cut -d' ' -f1)
+          SHA_AARCH64=$(sha256sum devo-aarch64.tar.gz | cut -d' ' -f1)
+
+          echo "sha_x86=${SHA_X86}" >> "$GITHUB_OUTPUT"
+          echo "sha_aarch64=${SHA_AARCH64}" >> "$GITHUB_OUTPUT"
+
+          echo "::notice::x86_64 sha256: ${SHA_X86}"
+          echo "::notice::aarch64 sha256: ${SHA_AARCH64}"
+
+          # Update PKGBUILD
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
+          sed -i "s|v${CURRENT}|v${VERSION}|g" PKGBUILD
+          sed -i "s|devo-bin-${CURRENT}|devo-bin-${VERSION}|g" PKGBUILD
+          sed -i "s/^sha256sums_x86_64=('.*')/sha256sums_x86_64=('${SHA_X86}')/" PKGBUILD
+          sed -i "s/^sha256sums_aarch64=('.*')/sha256sums_aarch64=('${SHA_AARCH64}')/" PKGBUILD
+
+          # Update .SRCINFO — replace all version occurrences (safe: dotted version won't match hex checksums)
+          sed -i "s/${CURRENT}/${VERSION}/g" .SRCINFO
+          sed -i "s/^\([[:space:]]*sha256sums_x86_64 = \).*/\1${SHA_X86}/" .SRCINFO
+          sed -i "s/^\([[:space:]]*sha256sums_aarch64 = \).*/\1${SHA_AARCH64}/" .SRCINFO
+
+          # Cleanup
+          rm -f devo-x86_64.tar.gz devo-aarch64.tar.gz
+
+          echo "::notice::PKGBUILD and .SRCINFO updated to version ${VERSION}"
+
+      - name: Setup SSH for AUR
+        if: steps.check.outputs.update == 'true'
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+
+      - name: Commit and push to AUR
+        if: steps.check.outputs.update == 'true'
+        run: |
+          # Add AUR host key
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+
+          # Configure git
+          git config user.name "ch4xer"
+          git config user.email "ch4ser@users.noreply.github.com"
+
+          # Stage and commit
+          git add PKGBUILD .SRCINFO
+          git commit -m "Update to ${{ steps.check.outputs.latest }}" || true
+
+          # Add AUR remote and push
+          git remote add aur ssh://aur@aur.archlinux.org/devo-bin.git 2>/dev/null || true
+          git push aur master
+
+      - name: Push to GitHub
+        if: steps.check.outputs.update == 'true'
+        run: |
+          git push origin master
