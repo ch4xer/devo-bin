@@ -90,39 +90,28 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
 
-      - name: Push update to AUR
+      - name: Commit updates to aur branch and push to GitHub
         if: steps.check.outputs.update == 'true'
+        id: commit
         run: |
           VERSION="${{ steps.check.outputs.latest }}"
-
-          # Add AUR host key
-          mkdir -p ~/.ssh
-          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
 
           git config user.name "ch4xer"
           git config user.email "ch4ser@users.noreply.github.com"
 
-          # Build a clean commit for AUR (no subdirectories allowed)
-          # Start from the aur branch which has no .github/
+          # Commit updated files to aur branch
           git checkout aur
 
-          # Apply updated files
           cp /tmp/PKGBUILD.new PKGBUILD
           cp /tmp/.SRCINFO.new .SRCINFO
 
           git add PKGBUILD .SRCINFO
           git commit -m "Update to ${VERSION}" || echo "No changes to commit"
 
-          # Push aur branch -> AUR master
-          git remote add aur ssh://aur@aur.archlinux.org/devo-bin.git 2>/dev/null || true
-          git push aur aur:master
+          # Push aur branch to GitHub
+          git push origin aur
 
-      - name: Sync update to GitHub master
-        if: steps.check.outputs.update == 'true'
-        run: |
-          VERSION="${{ steps.check.outputs.latest }}"
-
-          # Switch back to master and apply the same updates
+          # Also commit to master and push to GitHub
           git checkout master
 
           cp /tmp/PKGBUILD.new PKGBUILD
@@ -132,3 +121,33 @@ jobs:
           git commit -m "Update to ${VERSION}" || echo "No changes to commit"
 
           git push origin master
+
+      - name: Push update to AUR (with retry)
+        if: steps.check.outputs.update == 'true'
+        continue-on-error: true
+        run: |
+          # Add AUR host key
+          mkdir -p ~/.ssh
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+
+          # Add AUR remote
+          git remote add aur ssh://aur@aur.archlinux.org/devo-bin.git 2>/dev/null || true
+
+          # Retry push to AUR with exponential backoff
+          # AUR maintenance windows are usually brief
+          RETRY=0
+          MAX_RETRIES=5
+          while [ $RETRY -lt $MAX_RETRIES ]; do
+            if git push aur aur:master; then
+              echo "::notice::Successfully pushed to AUR"
+              exit 0
+            fi
+            RETRY=$((RETRY + 1))
+            if [ $RETRY -lt $MAX_RETRIES ]; then
+              DELAY=$((30 * (2 ** (RETRY - 1))))  # 30s, 60s, 120s, 240s
+              echo "::warning::AUR push failed (attempt ${RETRY}/${MAX_RETRIES}), retrying in ${DELAY}s..."
+              sleep $DELAY
+            fi
+          done
+          echo "::error::Failed to push to AUR after ${MAX_RETRIES} attempts (AUR may be down for extended maintenance)"
+          exit 1
