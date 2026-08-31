@@ -6,6 +6,9 @@ on:
     - cron: '23 8 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   check-and-update:
     runs-on: ubuntu-latest
@@ -101,6 +104,18 @@ jobs:
 
           # Commit updated files to aur branch
           git checkout aur
+
+          # Incorporate changes made directly on AUR before creating the update.
+          # Keep GitHub updates available when AUR is temporarily unreachable;
+          # the later push step will retry transient failures.
+          mkdir -p ~/.ssh
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          git remote add aur ssh://aur@aur.archlinux.org/devo-bin.git 2>/dev/null || true
+          if git fetch aur master; then
+            git merge --ff-only aur/master
+          else
+            echo "::warning::Could not fetch AUR before committing; push step will retry"
+          fi
 
           cp /tmp/PKGBUILD.new PKGBUILD
           cp /tmp/.SRCINFO.new .SRCINFO
