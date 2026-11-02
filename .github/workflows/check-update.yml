@@ -34,13 +34,14 @@ jobs:
 
           LATEST_VER="${LATEST#v}"
           CURRENT_VER=$(grep -oP '^pkgver=\K.*' PKGBUILD)
+          AUR_VER=$(git show origin/aur:PKGBUILD | grep -oP '^pkgver=\K.*')
 
           echo "latest=${LATEST_VER}" >> "$GITHUB_OUTPUT"
           echo "current=${CURRENT_VER}" >> "$GITHUB_OUTPUT"
 
-          if [ "$LATEST_VER" != "$CURRENT_VER" ]; then
+          if [ "$LATEST_VER" != "$CURRENT_VER" ] || [ "$LATEST_VER" != "$AUR_VER" ]; then
             echo "update=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::New version found: v${LATEST_VER} (current: v${CURRENT_VER})"
+            echo "::notice::Update needed: upstream v${LATEST_VER}, master v${CURRENT_VER}, AUR v${AUR_VER}"
           else
             echo "update=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Already at latest version: v${CURRENT_VER}"
@@ -56,9 +57,9 @@ jobs:
           # Download both architecture tarballs
           echo "::group::Downloading release tarballs"
           curl -sSL --fail -o /tmp/devo-x86_64.tar.gz \
-            "https://github.com/7df-lab/devo/releases/download/v${VERSION}/devo-v${VERSION}-x86_64-unknown-linux-musl.tar.gz"
+            "https://github.com/7df-lab/devo/releases/download/v${VERSION}/devo-tui-v${VERSION}-x86_64-linux-musl.tar.gz"
           curl -sSL --fail -o /tmp/devo-aarch64.tar.gz \
-            "https://github.com/7df-lab/devo/releases/download/v${VERSION}/devo-v${VERSION}-aarch64-unknown-linux-musl.tar.gz"
+            "https://github.com/7df-lab/devo/releases/download/v${VERSION}/devo-tui-v${VERSION}-aarch64-linux-musl.tar.gz"
           echo "::endgroup::"
 
           # Compute sha256sums
@@ -73,8 +74,6 @@ jobs:
 
           # Generate updated PKGBUILD
           sed "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD > /tmp/PKGBUILD.new
-          sed -i "s|v${CURRENT}|v${VERSION}|g" /tmp/PKGBUILD.new
-          sed -i "s|devo-bin-${CURRENT}|devo-bin-${VERSION}|g" /tmp/PKGBUILD.new
           sed -i "s/^sha256sums_x86_64=('.*')/sha256sums_x86_64=('${SHA_X86}')/" /tmp/PKGBUILD.new
           sed -i "s/^sha256sums_aarch64=('.*')/sha256sums_aarch64=('${SHA_AARCH64}')/" /tmp/PKGBUILD.new
 
